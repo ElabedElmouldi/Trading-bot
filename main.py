@@ -1,17 +1,17 @@
 import time
-import os
 import requests
 import ccxt
 import pandas as pd
 
 # =========================
-# 📲 TELEGRAM CONFIG
+# 📲 TELEGRAM (HARD CODED)
 # =========================
-TOKEN = os.getenv("8439548325:AAHOBBHy7EwcX3J5neIaf6iJuSjyGJCuZ68")
-CHAT_ID = os.getenv("5067771509")
+TOKEN = "8439548325:AAHOBBHy7EwcX3J5neIaf6iJuSjyGJCuZ68"
+CHAT_ID = "5067771509"
 
 def send_message(text):
-    if not TOKEN or not CHAT_ID:
+
+    if TOKEN == "" or CHAT_ID == "":
         print(text)
         return
 
@@ -28,13 +28,10 @@ def send_message(text):
 # =========================
 exchange = ccxt.bybit({
     "enableRateLimit": True,
-    "options": {
-        "defaultType": "spot"
-    }
+    "options": {"defaultType": "spot"}
 })
 
 exchange.load_markets()
-
 
 symbols = ["BTC/USDT", "ETH/USDT", "SOL/USDT", "BNB/USDT"]
 
@@ -43,6 +40,7 @@ symbols = ["BTC/USDT", "ETH/USDT", "SOL/USDT", "BNB/USDT"]
 # 📊 DATA
 # =========================
 def get_data(symbol):
+
     ohlcv = exchange.fetch_ohlcv(symbol, "5m", limit=120)
 
     df = pd.DataFrame(ohlcv, columns=["t","o","h","l","c","v"])
@@ -50,21 +48,23 @@ def get_data(symbol):
 
 
 # =========================
-# 🌍 MARKET REGIME
+# 🌍 REGIME
 # =========================
 def get_regime(df):
-    ma_fast = df["c"].rolling(10).mean().iloc[-1]
-    ma_slow = df["c"].rolling(50).mean().iloc[-1]
 
-    if ma_fast > ma_slow:
+    fast = df["c"].rolling(10).mean().iloc[-1]
+    slow = df["c"].rolling(50).mean().iloc[-1]
+
+    if fast > slow:
         return "BULL"
-    elif ma_fast < ma_slow:
+    elif fast < slow:
         return "BEAR"
+
     return "SIDEWAYS"
 
 
 # =========================
-# 🧠 SCORING ENGINE
+# 🧠 SCORING
 # =========================
 def smart_score(df):
 
@@ -73,23 +73,18 @@ def smart_score(df):
 
     score = 0
 
-    # 📈 trend
     if c.iloc[-1] > c.mean():
         score += 20
 
-    # 🚀 momentum
     if c.iloc[-1] > c.iloc[-5]:
         score += 20
 
-    # 💥 volume spike
     if v.iloc[-1] > v.mean() * 1.5:
         score += 25
 
-    # 📊 volatility filter
     if 0.005 < c.pct_change().std() < 0.03:
         score += 15
 
-    # 🔥 breakout
     if c.iloc[-1] > c.rolling(20).max().iloc[-2]:
         score += 20
 
@@ -108,6 +103,77 @@ positions = {}
 
 
 # =========================
-# 💰 EXECUTION ENGINE (PAPER)
+# 💰 EXECUTION
 # =========================
-def execute(symbol,
+def execute(symbol, price, score):
+
+    if symbol not in positions:
+
+        size = portfolio["balance"] * (score / 1000)
+
+        positions[symbol] = {
+            "entry": price,
+            "tp": price * 1.05,
+            "sl": price * 0.98,
+            "size": size
+        }
+
+        return "OPEN"
+
+    pos = positions[symbol]
+
+    if price >= pos["tp"]:
+        portfolio["balance"] += pos["size"] * 0.05
+        del positions[symbol]
+        return "TP"
+
+    if price <= pos["sl"]:
+        portfolio["balance"] -= pos["size"] * 0.02
+        del positions[symbol]
+        return "SL"
+
+    return None
+
+
+# =========================
+# 🔍 SCANNER
+# =========================
+def scan_market():
+
+    results = []
+
+    for s in symbols:
+
+        try:
+            df = get_data(s)
+
+            regime = get_regime(df)
+            score = smart_score(df)
+            price = df["c"].iloc[-1]
+
+            if regime == "BULL" and score >= 90:
+
+                results.append({
+                    "symbol": s,
+                    "score": score,
+                    "price": price,
+                    "regime": regime
+                })
+
+        except Exception as e:
+            print("Error:", e)
+
+    return sorted(results, key=lambda x: x["score"], reverse=True)
+
+
+# =========================
+# 📲 TELEGRAM REPORTS
+# =========================
+def send_opportunities(signals):
+
+    if not signals:
+        return
+
+    msg = "🔥 TOP OPPORTUNITIES\n\n"
+
+    for
