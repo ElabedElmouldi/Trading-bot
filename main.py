@@ -11,7 +11,7 @@ TOKEN = "8439548325:AAHOBBHy7EwcX3J5neIaf6iJuSjyGJCuZ68"
 USER_CHAT_ID = "5067771509"
 
 # 👥 المجموعة الخاصة (غيرها بالـ chat_id الحقيقي)
-GROUP_CHAT_ID = "-100XXXXXXXXXX"
+GROUP_CHAT_ID = "-1003692815602"
 
 # =========================
 # 📡 إرسال رسالة تيليغرام
