@@ -1,212 +1,290 @@
-# =========================
-# 🧠 IMPORTS
-# =========================
+import websocket
+import json
 import requests
-from binance.client import Client
-import pandas as pd
 import numpy as np
+from collections import deque
 
 # =========================
-# 🔌 BINANCE CONNECTION
-# =========================
-api_key = "YOUR_API_KEY"
-api_secret = "YOUR_SECRET"
-client = Client(api_key, api_secret)
-
-# =========================
-# 🧠 INDICATORS
+# 🔔 TELEGRAM CONFIG
 # =========================
 
-def is_uptrend(df):
-    ema50 = df['close'].ewm(span=50).mean()
-    ema200 = df['close'].ewm(span=200).mean()
-    return ema50.iloc[-1] > ema200.iloc[-1]
+TOKEN = "YOUR_TELEGRAM_TOKEN"
+CHAT_ID = "YOUR_CHAT_ID"
 
 
-def bollinger_squeeze(df):
-    mid = df['close'].rolling(20).mean()
-    std = df['close'].rolling(20).std()
-    upper = mid + 2 * std
-    lower = mid - 2 * std
-    width = (upper - lower) / mid
-    return width.iloc[-1] < 0.05
-
-
-def volume_spike(df):
-    return df['volume'].iloc[-1] > 3 * df['volume'].rolling(20).mean().iloc[-1]
-
-
-def atr(df):
-    return (df['high'] - df['low']).rolling(14).mean()
+def send(msg):
+    url = f"https://api.telegram.org/bot{TOKEN}/sendMessage"
+    requests.post(url, data={"chat_id": CHAT_ID, "text": msg})
 
 
 # =========================
-# 🐋 WHALE DETECTION
+# 🧠 MARKET MEMORY
 # =========================
 
-def whale_detect(df):
-    return volume_spike(df)
+market_data = {}
+MAX_LEN = 30
 
 
-# =========================
-# 🎭 MANIPULATION DETECTOR
-# =========================
+def update(symbol, price, volume):
 
-def fake_breakout(df, level):
-    return (
-        df['close'].iloc[-1] > level and
-        df['volume'].iloc[-1] < 1.5 * df['volume'].rolling(20).mean().iloc[-1]
-    )
+    if symbol not in market_data:
+        market_data[symbol] = {
+            "prices": deque(maxlen=MAX_LEN),
+            "volumes": deque(maxlen=MAX_LEN)
+        }
 
-
-# =========================
-# 📊 ORDER BOOK AI
-# =========================
-
-def order_book(symbol):
-    depth = client.get_order_book(symbol=symbol, limit=50)
-    bids = depth['bids']
-    asks = depth['asks']
-
-    bid_vol = sum(float(b[1]) for b in bids)
-    ask_vol = sum(float(a[1]) for a in asks)
-
-    imbalance = bid_vol / ask_vol if ask_vol != 0 else 1
-
-    return imbalance
+    market_data[symbol]["prices"].append(price)
+    market_data[symbol]["volumes"].append(volume)
 
 
 # =========================
-# 🧠 AI SCORE ENGINE
+# 🧠 AI FEATURES
 # =========================
 
-def ai_score(df, level):
+def ai_score(prices, volumes):
+
+    if len(prices) < 20:
+        return 0
+
+    score = 0
+    mean = sum(prices) / len(prices)
+
+    # trend
+    if prices[-1] > mean:
+        score += 20
+
+    # squeeze
+    if max(prices[-10:]) - min(prices[-10:]) < mean * 0.01:
+        score += 25
+
+    # volume expansion
+    if volumes[-1] > sum(volumes) / len(volumes) * 1.8:
+        score += 30
+
+    # micro compression
+    if abs(prices[-1] - prices[-2]) < mean * 0.002:
+        score += 25
+
+    return score
+
+
+# =========================
+# 🚨 FAKE BREAKOUT FILTER
+# =========================
+
+def fake_breakout_filter(prices, volumes, level):
 
     score = 0
 
-    if is_uptrend(df):
+    if volumes[-1] < sum(volumes[-20:]) / 20 * 1.5:
+        score += 30
+
+    if len(prices) > 2 and prices[-2] > level and prices[-1] < level:
+        score += 30
+
+    if max(prices[-5:]) < level * 1.01:
         score += 20
 
-    if bollinger_squeeze(df):
-        score += 20
-
-    if volume_spike(df):
-        score += 20
-
-    if whale_detect(df):
-        score += 20
-
-    if not fake_breakout(df, level):
+    if abs(prices[-1] - prices[-2]) > abs(prices[-2] - prices[-3]):
         score += 20
 
     return score
 
 
 # =========================
-# 🛡️ RISK MANAGER
+# 🧲 LIQUIDITY ENGINE
 # =========================
 
-def dynamic_risk(balance, score):
+def liquidity_zones(prices):
 
-    if score >= 90:
-        return balance * 0.02
-    elif score >= 80:
-        return balance * 0.01
-    elif score >= 70:
-        return balance * 0.005
-    else:
-        return 0
+    zones = []
 
+    for i in range(2, len(prices) - 2):
 
-def stop_loss(entry, atr_value):
-    return entry - (atr_value * 1.5)
+        if prices[i] > prices[i-1] and prices[i] > prices[i+1]:
+            zones.append(prices[i])
 
+        if prices[i] < prices[i-1] and prices[i] < prices[i+1]:
+            zones.append(prices[i])
 
-def take_profit(entry):
-    return entry * 1.03
+    return zones
 
 
-# =========================
-# 💰 EXECUTION ENGINE
-# =========================
+def liquidity_score(price, zones):
 
-def place_order(symbol, quantity):
-    return client.order_market_buy(
-        symbol=symbol,
-        quantity=quantity
-    )
+    score = 0
 
+    for z in zones:
 
-# =========================
-# 🔔 TELEGRAM ALERT
-# =========================
+        dist = abs(price - z)
 
-def send_alert(message):
-    token = "YOUR_TELEGRAM_TOKEN"
-    chat_id = "YOUR_CHAT_ID"
+        if dist < price * 0.002:
+            score += 50
+        elif dist < price * 0.005:
+            score += 25
 
-    url = f"https://api.telegram.org/bot{token}/sendMessage"
-    requests.post(url, data={"chat_id": chat_id, "text": message})
+    return min(score, 100)
 
 
 # =========================
-# 🚀 MAIN ENGINE
+# 📊 ORDER BOOK (SIMPLIFIED WS DATA)
 # =========================
 
-def run_bot(symbol, df, level, balance):
+def orderbook_score(bids, asks):
 
-    score = ai_score(df, level)
+    bid = sum(bids)
+    ask = sum(asks)
 
-    if score < 80:
-        return "NO TRADE"
+    if ask == 0:
+        return 100
 
-    risk = dynamic_risk(balance, score)
+    imbalance = bid / ask
 
-    if risk == 0:
-        return "RISK BLOCKED"
+    score = 0
 
-    entry = df['close'].iloc[-1]
-    atr_value = atr(df).iloc[-1]
+    if imbalance > 1.5:
+        score += 50
+    elif imbalance < 0.7:
+        score += 50
 
-    sl = stop_loss(entry, atr_value)
-    tp = take_profit(entry)
+    if max(bids) > np.mean(bids) * 5:
+        score += 25
 
-    qty = risk / (entry - sl)
+    if max(asks) > np.mean(asks) * 5:
+        score += 25
 
-    place_order(symbol, qty)
+    return min(score, 100)
 
-    send_alert(f"""
-🚨 TRADE EXECUTED
+
+# =========================
+# 🧠 SELF LEARNING WEIGHTS
+# =========================
+
+weights = {
+    "liq": 0.5,
+    "ob": 0.5,
+    "trend": 0.3,
+    "vol": 0.2
+}
+
+
+def fusion(liq, ob):
+
+    return (liq * weights["liq"]) + (ob * weights["ob"])
+
+
+# =========================
+# 🤖 SELF LEARNING UPDATE
+# =========================
+
+def learn(state, reward):
+
+    lr = 0.01
+
+    for k in weights:
+
+        if reward > 0:
+            weights[k] += lr * state[k]
+        else:
+            weights[k] -= lr * state[k]
+
+
+# =========================
+# 🚨 FINAL DECISION ENGINE
+# =========================
+
+def analyze(symbol):
+
+    data = market_data.get(symbol)
+
+    if not data or len(data["prices"]) < 20:
+        return
+
+    prices = list(data["prices"])
+    volumes = list(data["volumes"])
+
+    price = prices[-1]
+
+    # AI
+    explosion = ai_score(prices, volumes)
+
+    # Fake breakout
+    trap = fake_breakout_filter(prices, volumes, price)
+
+    # Liquidity
+    zones = liquidity_zones(prices)
+    liq = liquidity_score(price, zones)
+
+    # Order book (simulated)
+    bids = [v * 0.6 for v in volumes[-5:]]
+    asks = [v * 0.4 for v in volumes[-5:]]
+
+    ob = orderbook_score(bids, asks)
+
+    # Fusion
+    fusion_score = fusion(liq, ob)
+
+    # FILTER
+    if trap >= 75:
+        return
+
+    # FINAL DECISION
+    if explosion >= 85 and fusion_score >= 70:
+
+        send(f"""
+🚨 SMART MONEY SIGNAL
 
 Symbol: {symbol}
-Score: {score}
 
-Entry: {entry}
-SL: {sl}
-TP: {tp}
+Price: {price:.4f}
 
-Risk: {risk}
+Explosion Score: {explosion}/100
+Liquidity Score: {liq}/100
+OrderBook Score: {ob}/100
+Fusion Score: {fusion_score}/100
+Trap Score: {trap}/100
+
+🧠 AI SELF-LEARNING ACTIVE
+🔥 INSTITUTIONAL PRESSURE DETECTED
+
+🚀 BREAKOUT SETUP
 """)
 
-    return "TRADE EXECUTED"
-
 
 # =========================
-# 🔁 LOOP (SIMULATION)
+# 📡 BINANCE WEBSOCKET
 # =========================
 
-def start(all_symbols, data_dict, balance):
+def on_message(ws, message):
 
-    for symbol in all_symbols:
+    data = json.loads(message)
 
-        df = data_dict[symbol]
-        level = df['close'].max()
+    for coin in data:
 
-        result = run_bot(symbol, df, level, balance)
+        symbol = coin['s']
+        price = float(coin['c'])
+        volume = float(coin['v'])
 
-        print(symbol, result)
+        update(symbol, price, volume)
+
+        analyze(symbol)
 
 
-# =========================
-# 🏁 END
-# =========================
+def on_open(ws):
+    print("🔥 LIVE SMART MONEY AI STARTED")
+
+
+def on_close(ws):
+    print("❌ DISCONNECTED")
+
+
+socket = "wss://stream.binance.com:9443/ws/!miniTicker@arr"
+
+ws = websocket.WebSocketApp(
+    socket,
+    on_message=on_message,
+    on_open=on_open,
+    on_close=on_close
+)
+
+ws.run_forever()
