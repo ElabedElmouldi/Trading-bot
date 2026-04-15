@@ -1,1 +1,3 @@
-run = "python main.py"
+main.py
+requirements.txt
+.replit
