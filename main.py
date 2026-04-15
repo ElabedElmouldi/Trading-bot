@@ -1,290 +1,113 @@
-import websocket
-import json
+import time
+import os
 import requests
-import numpy as np
-from collections import deque
+import ccxt
+import pandas as pd
 
 # =========================
-# 🔔 TELEGRAM CONFIG
+# 📲 TELEGRAM CONFIG
 # =========================
+TOKEN = os.getenv("BOT_TOKEN")
+CHAT_ID = os.getenv("CHAT_ID")
 
-TOKEN = "YOUR_TELEGRAM_TOKEN"
-CHAT_ID = "YOUR_CHAT_ID"
+def send_message(text):
+    if not TOKEN or not CHAT_ID:
+        print(text)
+        return
 
-
-def send(msg):
     url = f"https://api.telegram.org/bot{TOKEN}/sendMessage"
-    requests.post(url, data={"chat_id": CHAT_ID, "text": msg})
+
+    try:
+        requests.post(url, data={"chat_id": CHAT_ID, "text": text})
+    except:
+        pass
 
 
 # =========================
-# 🧠 MARKET MEMORY
+# ⚙️ BYBIT EXCHANGE
 # =========================
+exchange = ccxt.bybit({
+    "enableRateLimit": True,
+    "options": {
+        "defaultType": "spot"
+    }
+})
 
-market_data = {}
-MAX_LEN = 30
+exchange.load_markets()
 
 
-def update(symbol, price, volume):
-
-    if symbol not in market_data:
-        market_data[symbol] = {
-            "prices": deque(maxlen=MAX_LEN),
-            "volumes": deque(maxlen=MAX_LEN)
-        }
-
-    market_data[symbol]["prices"].append(price)
-    market_data[symbol]["volumes"].append(volume)
+symbols = ["BTC/USDT", "ETH/USDT", "SOL/USDT", "BNB/USDT"]
 
 
 # =========================
-# 🧠 AI FEATURES
+# 📊 DATA
 # =========================
+def get_data(symbol):
+    ohlcv = exchange.fetch_ohlcv(symbol, "5m", limit=120)
 
-def ai_score(prices, volumes):
+    df = pd.DataFrame(ohlcv, columns=["t","o","h","l","c","v"])
+    return df
 
-    if len(prices) < 20:
-        return 0
+
+# =========================
+# 🌍 MARKET REGIME
+# =========================
+def get_regime(df):
+    ma_fast = df["c"].rolling(10).mean().iloc[-1]
+    ma_slow = df["c"].rolling(50).mean().iloc[-1]
+
+    if ma_fast > ma_slow:
+        return "BULL"
+    elif ma_fast < ma_slow:
+        return "BEAR"
+    return "SIDEWAYS"
+
+
+# =========================
+# 🧠 SCORING ENGINE
+# =========================
+def smart_score(df):
+
+    c = df["c"]
+    v = df["v"]
 
     score = 0
-    mean = sum(prices) / len(prices)
 
-    # trend
-    if prices[-1] > mean:
+    # 📈 trend
+    if c.iloc[-1] > c.mean():
         score += 20
 
-    # squeeze
-    if max(prices[-10:]) - min(prices[-10:]) < mean * 0.01:
+    # 🚀 momentum
+    if c.iloc[-1] > c.iloc[-5]:
+        score += 20
+
+    # 💥 volume spike
+    if v.iloc[-1] > v.mean() * 1.5:
         score += 25
 
-    # volume expansion
-    if volumes[-1] > sum(volumes) / len(volumes) * 1.8:
-        score += 30
+    # 📊 volatility filter
+    if 0.005 < c.pct_change().std() < 0.03:
+        score += 15
 
-    # micro compression
-    if abs(prices[-1] - prices[-2]) < mean * 0.002:
-        score += 25
+    # 🔥 breakout
+    if c.iloc[-1] > c.rolling(20).max().iloc[-2]:
+        score += 20
 
     return score
 
 
 # =========================
-# 🚨 FAKE BREAKOUT FILTER
+# 💼 PORTFOLIO
 # =========================
-
-def fake_breakout_filter(prices, volumes, level):
-
-    score = 0
-
-    if volumes[-1] < sum(volumes[-20:]) / 20 * 1.5:
-        score += 30
-
-    if len(prices) > 2 and prices[-2] > level and prices[-1] < level:
-        score += 30
-
-    if max(prices[-5:]) < level * 1.01:
-        score += 20
-
-    if abs(prices[-1] - prices[-2]) > abs(prices[-2] - prices[-3]):
-        score += 20
-
-    return score
-
-
-# =========================
-# 🧲 LIQUIDITY ENGINE
-# =========================
-
-def liquidity_zones(prices):
-
-    zones = []
-
-    for i in range(2, len(prices) - 2):
-
-        if prices[i] > prices[i-1] and prices[i] > prices[i+1]:
-            zones.append(prices[i])
-
-        if prices[i] < prices[i-1] and prices[i] < prices[i+1]:
-            zones.append(prices[i])
-
-    return zones
-
-
-def liquidity_score(price, zones):
-
-    score = 0
-
-    for z in zones:
-
-        dist = abs(price - z)
-
-        if dist < price * 0.002:
-            score += 50
-        elif dist < price * 0.005:
-            score += 25
-
-    return min(score, 100)
-
-
-# =========================
-# 📊 ORDER BOOK (SIMPLIFIED WS DATA)
-# =========================
-
-def orderbook_score(bids, asks):
-
-    bid = sum(bids)
-    ask = sum(asks)
-
-    if ask == 0:
-        return 100
-
-    imbalance = bid / ask
-
-    score = 0
-
-    if imbalance > 1.5:
-        score += 50
-    elif imbalance < 0.7:
-        score += 50
-
-    if max(bids) > np.mean(bids) * 5:
-        score += 25
-
-    if max(asks) > np.mean(asks) * 5:
-        score += 25
-
-    return min(score, 100)
-
-
-# =========================
-# 🧠 SELF LEARNING WEIGHTS
-# =========================
-
-weights = {
-    "liq": 0.5,
-    "ob": 0.5,
-    "trend": 0.3,
-    "vol": 0.2
+portfolio = {
+    "balance": 1000,
+    "positions": {}
 }
 
-
-def fusion(liq, ob):
-
-    return (liq * weights["liq"]) + (ob * weights["ob"])
+positions = {}
 
 
 # =========================
-# 🤖 SELF LEARNING UPDATE
+# 💰 EXECUTION ENGINE (PAPER)
 # =========================
-
-def learn(state, reward):
-
-    lr = 0.01
-
-    for k in weights:
-
-        if reward > 0:
-            weights[k] += lr * state[k]
-        else:
-            weights[k] -= lr * state[k]
-
-
-# =========================
-# 🚨 FINAL DECISION ENGINE
-# =========================
-
-def analyze(symbol):
-
-    data = market_data.get(symbol)
-
-    if not data or len(data["prices"]) < 20:
-        return
-
-    prices = list(data["prices"])
-    volumes = list(data["volumes"])
-
-    price = prices[-1]
-
-    # AI
-    explosion = ai_score(prices, volumes)
-
-    # Fake breakout
-    trap = fake_breakout_filter(prices, volumes, price)
-
-    # Liquidity
-    zones = liquidity_zones(prices)
-    liq = liquidity_score(price, zones)
-
-    # Order book (simulated)
-    bids = [v * 0.6 for v in volumes[-5:]]
-    asks = [v * 0.4 for v in volumes[-5:]]
-
-    ob = orderbook_score(bids, asks)
-
-    # Fusion
-    fusion_score = fusion(liq, ob)
-
-    # FILTER
-    if trap >= 75:
-        return
-
-    # FINAL DECISION
-    if explosion >= 85 and fusion_score >= 70:
-
-        send(f"""
-🚨 SMART MONEY SIGNAL
-
-Symbol: {symbol}
-
-Price: {price:.4f}
-
-Explosion Score: {explosion}/100
-Liquidity Score: {liq}/100
-OrderBook Score: {ob}/100
-Fusion Score: {fusion_score}/100
-Trap Score: {trap}/100
-
-🧠 AI SELF-LEARNING ACTIVE
-🔥 INSTITUTIONAL PRESSURE DETECTED
-
-🚀 BREAKOUT SETUP
-""")
-
-
-# =========================
-# 📡 BINANCE WEBSOCKET
-# =========================
-
-def on_message(ws, message):
-
-    data = json.loads(message)
-
-    for coin in data:
-
-        symbol = coin['s']
-        price = float(coin['c'])
-        volume = float(coin['v'])
-
-        update(symbol, price, volume)
-
-        analyze(symbol)
-
-
-def on_open(ws):
-    print("🔥 LIVE SMART MONEY AI STARTED")
-
-
-def on_close(ws):
-    print("❌ DISCONNECTED")
-
-
-socket = "wss://stream.binance.com:9443/ws/!miniTicker@arr"
-
-ws = websocket.WebSocketApp(
-    socket,
-    on_message=on_message,
-    on_open=on_open,
-    on_close=on_close
-)
-
-ws.run_forever()
+def execute(symbol,
