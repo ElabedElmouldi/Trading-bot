@@ -2,14 +2,24 @@ import time
 import requests
 import ccxt
 import pandas as pd
+import sqlite3
+import math
 
 # =========================
-# 📲 TELEGRAM
+# ⚙️ CONFIG
 # =========================
 TOKEN = "8439548325:AAHOBBHy7EwcX3J5neIaf6iJuSjyGJCuZ68"
 CHAT_ID = "5067771509"
 
-def send_message(msg):
+START_BALANCE = 1000
+RISK_PER_TRADE = 0.02  # 2%
+TRADE_SIZE = 100
+
+
+# =========================
+# 📲 TELEGRAM
+# =========================
+def send(msg):
     try:
         url = f"https://api.telegram.org/bot{TOKEN}/sendMessage"
         requests.post(url, data={"chat_id": CHAT_ID, "text": msg})
@@ -22,103 +32,240 @@ def send_message(msg):
 # =========================
 exchange = ccxt.kucoin({"enableRateLimit": True})
 markets = exchange.load_markets()
-
 symbols = list(markets.keys())[:1000]
 
 
 # =========================
-# 🔁 ROTATION SYSTEM (IMPORTANT)
+# 💾 DATABASE
 # =========================
-BATCH_SIZE = 200
-cycle_index = 0
+conn = sqlite3.connect("trades.db", check_same_thread=False)
+c = conn.cursor()
 
-
-def get_batch():
-    global cycle_index
-
-    start = cycle_index * BATCH_SIZE
-    end = start + BATCH_SIZE
-
-    batch = symbols[start:end]
-
-    cycle_index += 1
-
-    if end >= len(symbols):
-        cycle_index = 0
-
-    return batch
+c.execute("""
+CREATE TABLE IF NOT EXISTS trades (
+id INTEGER PRIMARY KEY AUTOINCREMENT,
+symbol TEXT,
+entry REAL,
+exit REAL,
+status TEXT,
+score REAL,
+time TEXT
+)
+""")
+conn.commit()
 
 
 # =========================
-# 🧠 SAFE FETCH (NO CRASH)
+# 💼 PORTFOLIO
 # =========================
-def safe_fetch(symbol):
-
-    for i in range(3):
-        try:
-            return pd.DataFrame(
-                exchange.fetch_ohlcv(symbol, "15m", limit=120),
-                columns=["t","o","h","l","c","v"]
-            )
-        except:
-            time.sleep(2)
-
-    return None
+portfolio = {
+    "balance": START_BALANCE,
+    "positions": {}
+}
 
 
 # =========================
-# 💣 SCORE ENGINE
+# 📊 DATA
 # =========================
-def score(df):
+def get(symbol, tf="15m"):
+    try:
+        return pd.DataFrame(
+            exchange.fetch_ohlcv(symbol, tf, limit=120),
+            columns=["t","o","h","l","c","v"]
+        )
+    except:
+        return None
+
+
+# =========================
+# 🧠 ML FEATURE ENGINE
+# =========================
+def ml_score(df):
 
     if df is None:
-        return 0
+        return 0, []
 
-    s = 0
+    reasons = []
+    score = 0
+
+    c = df["c"]
+    v = df["v"]
 
     # trend
-    if df["c"].iloc[-1] > df["c"].rolling(50).mean().iloc[-1]:
-        s += 30
+    if c.iloc[-1] > c.rolling(50).mean().iloc[-1]:
+        score += 25
+        reasons.append("Trend bullish")
+
+    # momentum
+    if c.iloc[-1] > c.iloc[-5]:
+        score += 20
+        reasons.append("Momentum up")
 
     # volume spike
-    if df["v"].iloc[-1] > df["v"].mean() * 2:
-        s += 25
+    if v.iloc[-1] > v.mean() * 2:
+        score += 20
+        reasons.append("Volume spike")
 
     # breakout
-    if df["c"].iloc[-1] > df["c"].rolling(20).max().iloc[-2]:
-        s += 25
+    if c.iloc[-1] > c.rolling(20).max().iloc[-2]:
+        score += 20
+        reasons.append("Breakout confirmed")
 
-    # squeeze
-    if df["c"].rolling(20).std().iloc[-1] < df["c"].mean() * 0.02:
-        s += 20
+    # volatility compression (squeeze)
+    if c.rolling(20).std().iloc[-1] < c.mean() * 0.02:
+        score += 15
+        reasons.append("Squeeze detected")
 
-    return s
+    return score, reasons
 
 
 # =========================
-# 🔍 SCAN ONE CYCLE
+# 🧠 MULTI TIMEFRAME CONFIRMATION
 # =========================
-def scan_cycle():
+def confirm(symbol):
 
-    batch = get_batch()
+    for tf in ["15m", "1h", "4h"]:
+        df = get(symbol, tf)
+
+        if df is None:
+            return False
+
+        if df["c"].iloc[-1] <= df["c"].rolling(50).mean().iloc[-1]:
+            return False
+
+    return True
+
+
+# =========================
+# 💣 RISK ENGINE
+# =========================
+def calc_position_size(price):
+
+    risk_amount = portfolio["balance"] * RISK_PER_TRADE
+    size = risk_amount / (price * 0.02)
+
+    return max(size, 1)
+
+
+# =========================
+# 💾 SAVE TRADE
+# =========================
+def save(symbol, entry, status, score, exit_price=None):
+
+    c.execute("""
+    INSERT INTO trades VALUES (NULL,?,?,?,?,?,datetime('now'))
+    """, (symbol, entry, exit_price, status, score))
+
+    conn.commit()
+
+
+# =========================
+# 📥 AUTO ENTRY
+# =========================
+def open_trade(symbol, price, score, reasons):
+
+    if symbol in portfolio["positions"]:
+        return
+
+    size = calc_position_size(price)
+
+    portfolio["positions"][symbol] = {
+        "entry": price,
+        "sl": price * 0.98,
+        "size": size,
+        "score": score
+    }
+
+    save(symbol, price, "OPEN", score)
+
+    send(f"""
+📥 AUTO ENTRY
+
+{symbol}
+Price: {price}
+Score: {score}/100
+Size: {size}
+
+📌 Reasons:
+""" + "\n".join(reasons))
+
+
+# =========================
+# 📤 EXIT
+# =========================
+def close_trade(symbol, price, reason):
+
+    t = portfolio["positions"].pop(symbol)
+
+    pnl = (price - t["entry"]) * t["size"]
+
+    portfolio["balance"] += pnl
+
+    save(symbol, t["entry"], "CLOSED", t["score"], price)
+
+    send(f"""
+📤 EXIT
+
+{symbol}
+Exit: {price}
+PnL: {round(pnl,2)}$
+Reason: {reason}
+""")
+
+
+# =========================
+# 🔄 MANAGE POSITION
+# =========================
+def manage(symbol, price):
+
+    t = portfolio["positions"][symbol]
+
+    if price <= t["sl"]:
+        close_trade(symbol, price, "STOP LOSS")
+
+
+# =========================
+# 🔍 SCANNER
+# =========================
+BATCH = 200
+index = 0
+
+def batch():
+
+    global index
+
+    start = index * BATCH
+    end = start + BATCH
+
+    data = symbols[start:end]
+
+    index += 1
+    if end >= len(symbols):
+        index = 0
+
+    return data
+
+
+def scan():
 
     results = []
 
-    for s in batch:
+    for s in batch():
 
-        df = safe_fetch(s)
+        df = get(s)
 
-        sc = score(df)
+        score, reasons = ml_score(df)
 
-        if sc >= 90:
+        if score >= 90 and confirm(s):
 
             results.append({
                 "symbol": s,
-                "score": sc,
-                "price": df["c"].iloc[-1]
+                "score": score,
+                "price": df["c"].iloc[-1],
+                "reasons": reasons
             })
 
-        time.sleep(0.3)  # 🔥 anti-ban delay
+        time.sleep(0.2)
 
     return sorted(results, key=lambda x: x["score"], reverse=True)
 
@@ -133,42 +280,56 @@ def send_top(signals):
     if not top:
         return
 
-    msg = "💣 TOP OPPORTUNITIES\n\n"
+    msg = "💣 INSTITUTIONAL SIGNALS\n\n"
 
     for s in top:
         msg += f"""
 🚀 {s['symbol']}
 💥 Score: {s['score']}
 💰 Price: {s['price']}
------------------
-"""
 
-    send_message(msg)
+📌 Reasons:
+""" + "\n".join(s["reasons"]) + "\n-----------------\n"
+
+    send(msg)
 
 
 # =========================
-# 🚀 MAIN LOOP (STABLE)
+# 🚀 START
 # =========================
-print("STABLE AI SCANNER STARTED")
+print("HEDGE FUND V8 STARTED")
+send("🚀 V8 INSTITUTIONAL AI STARTED")
 
-last_report = time.time()
+last = time.time()
 
 while True:
 
     try:
 
-        signals = scan_cycle()
+        signals = scan()
 
         send_top(signals)
 
-        # report every 5 min (not spam)
-        if time.time() - last_report > 300:
-            send_message(f"📊 Cycle update: {len(signals)} signals found")
-            last_report = time.time()
+        # AUTO EXECUTION
+        for s in signals[:3]:
+
+            if s["symbol"] not in portfolio["positions"]:
+                open_trade(s["symbol"], s["price"], s["score"], s["reasons"])
+
+        # manage trades
+        for sym in list(portfolio["positions"].keys()):
+            try:
+                price = get(sym)["c"].iloc[-1]
+                manage(sym, price)
+            except:
+                pass
+
+        if time.time() - last > 3600:
+            send(f"📊 REPORT\nBalance: {portfolio['balance']}\nOpen: {len(portfolio['positions'])}")
+            last = time.time()
 
     except Exception as e:
-
-        print("Reconnect safe recovery:", e)
+        print("ERROR:", e)
         time.sleep(5)
 
     time.sleep(10)
