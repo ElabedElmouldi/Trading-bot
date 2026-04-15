@@ -7,7 +7,7 @@ import pandas as pd
 # =========================
 # 📲 TELEGRAM CONFIG
 # =========================
-TOKEN = os.getenv("BOT_TOKEN")
+TOKEN = os.getenv("8439548325:AAHOBBHy7EwcX3J5neIaf6iJuSjyGJCuZ68")
 CHAT_ID = os.getenv("CHAT_ID")
 
 def send_message(text):
