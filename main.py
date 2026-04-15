@@ -1,242 +1,212 @@
-import time
-import os
+# =========================
+# 🧠 IMPORTS
+# =========================
 import requests
-import ccxt
+from binance.client import Client
 import pandas as pd
 import numpy as np
 
 # =========================
-# 📲 TELEGRAM
+# 🔌 BINANCE CONNECTION
 # =========================
-TOKEN = os.getenv("8439548325:AAHOBBHy7EwcX3J5neIaf6iJuSjyGJCuZ68")
-CHAT_ID = os.getenv("5067771509")
-
-def send_message(text):
-    if not TOKEN or not CHAT_ID:
-        print(text)
-        return
-
-    url = f"https://api.telegram.org/bot{TOKEN}/sendMessage"
-    try:
-        requests.post(url, data={"chat_id": CHAT_ID, "text": text})
-    except:
-        pass
-
+api_key = "YOUR_API_KEY"
+api_secret = "YOUR_SECRET"
+client = Client(api_key, api_secret)
 
 # =========================
-# ⚙️ EXCHANGE
+# 🧠 INDICATORS
 # =========================
-exchange = ccxt.binance()
 
-symbols = ["BTC/USDT", "ETH/USDT", "SOL/USDT", "BNB/USDT"]
+def is_uptrend(df):
+    ema50 = df['close'].ewm(span=50).mean()
+    ema200 = df['close'].ewm(span=200).mean()
+    return ema50.iloc[-1] > ema200.iloc[-1]
+
+
+def bollinger_squeeze(df):
+    mid = df['close'].rolling(20).mean()
+    std = df['close'].rolling(20).std()
+    upper = mid + 2 * std
+    lower = mid - 2 * std
+    width = (upper - lower) / mid
+    return width.iloc[-1] < 0.05
+
+
+def volume_spike(df):
+    return df['volume'].iloc[-1] > 3 * df['volume'].rolling(20).mean().iloc[-1]
+
+
+def atr(df):
+    return (df['high'] - df['low']).rolling(14).mean()
 
 
 # =========================
-# 📊 DATA
+# 🐋 WHALE DETECTION
 # =========================
-def get_data(symbol):
-    df = pd.DataFrame(
-        exchange.fetch_ohlcv(symbol, "5m", limit=120),
-        columns=["t","o","h","l","c","v"]
+
+def whale_detect(df):
+    return volume_spike(df)
+
+
+# =========================
+# 🎭 MANIPULATION DETECTOR
+# =========================
+
+def fake_breakout(df, level):
+    return (
+        df['close'].iloc[-1] > level and
+        df['volume'].iloc[-1] < 1.5 * df['volume'].rolling(20).mean().iloc[-1]
     )
-    return df
 
 
 # =========================
-# 🧠 AGENT 1 — TREND HUNTER
+# 📊 ORDER BOOK AI
 # =========================
-def agent_trend(df):
-    ma1 = df["c"].rolling(10).mean().iloc[-1]
-    ma2 = df["c"].rolling(30).mean().iloc[-1]
-    return 1 if ma1 > ma2 else 0
 
+def order_book(symbol):
+    depth = client.get_order_book(symbol=symbol, limit=50)
+    bids = depth['bids']
+    asks = depth['asks']
 
-# =========================
-# 🧠 AGENT 2 — SMART MONEY
-# =========================
-def agent_smart_money(df):
-    v = df["v"]
-    c = df["c"]
+    bid_vol = sum(float(b[1]) for b in bids)
+    ask_vol = sum(float(a[1]) for a in asks)
 
-    if v.iloc[-1] > v.mean() * 1.5 and c.iloc[-1] > c.iloc[-5]:
-        return 1
-    return 0
+    imbalance = bid_vol / ask_vol if ask_vol != 0 else 1
+
+    return imbalance
 
 
 # =========================
-# 🧠 AGENT 3 — MOMENTUM
+# 🧠 AI SCORE ENGINE
 # =========================
-def agent_momentum(df):
-    return 1 if df["c"].iloc[-1] > df["c"].iloc[-10] else 0
 
+def ai_score(df, level):
 
-# =========================
-# 🧠 AGENT 4 — RISK FILTER
-# =========================
-def agent_risk(df):
-    vol = df["c"].pct_change().std()
-    return 1 if 0.005 < vol < 0.03 else 0
+    score = 0
 
+    if is_uptrend(df):
+        score += 20
 
-# =========================
-# 🧠 CONSENSUS ENGINE
-# =========================
-def consensus_score(df):
+    if bollinger_squeeze(df):
+        score += 20
 
-    votes = [
-        agent_trend(df),
-        agent_smart_money(df),
-        agent_momentum(df),
-        agent_risk(df)
-    ]
+    if volume_spike(df):
+        score += 20
 
-    return sum(votes)  # max = 4
+    if whale_detect(df):
+        score += 20
+
+    if not fake_breakout(df, level):
+        score += 20
+
+    return score
 
 
 # =========================
-# 💼 PORTFOLIO
+# 🛡️ RISK MANAGER
 # =========================
-portfolio = {
-    "balance": 1000,
-    "positions": {}
-}
 
-positions = {}
+def dynamic_risk(balance, score):
+
+    if score >= 90:
+        return balance * 0.02
+    elif score >= 80:
+        return balance * 0.01
+    elif score >= 70:
+        return balance * 0.005
+    else:
+        return 0
+
+
+def stop_loss(entry, atr_value):
+    return entry - (atr_value * 1.5)
+
+
+def take_profit(entry):
+    return entry * 1.03
 
 
 # =========================
 # 💰 EXECUTION ENGINE
 # =========================
-def execute(symbol, price, score):
 
-    if symbol not in positions:
-
-        size = portfolio["balance"] * (score / 10)
-
-        positions[symbol] = {
-            "entry": price,
-            "tp": price * 1.04,
-            "sl": price * 0.98,
-            "size": size
-        }
-
-        return "OPEN"
-
-    pos = positions[symbol]
-
-    if price >= pos["tp"]:
-        portfolio["balance"] += pos["size"] * 0.04
-        del positions[symbol]
-        return "TP"
-
-    if price <= pos["sl"]:
-        portfolio["balance"] -= pos["size"] * 0.02
-        del positions[symbol]
-        return "SL"
-
-    return None
-
-
-# =========================
-# 🔍 SCANNER
-# =========================
-def scan():
-
-    results = []
-
-    for s in symbols:
-
-        try:
-
-            df = get_data(s)
-
-            score = consensus_score(df)
-
-            price = df["c"].iloc[-1]
-
-            # 🔥 INSTITUTIONAL FILTER
-            if score >= 3:
-
-                results.append({
-                    "symbol": s,
-                    "score": score,
-                    "price": price
-                })
-
-        except:
-            continue
-
-    return sorted(results, key=lambda x: x["score"], reverse=True)
-
-
-# =========================
-# 📲 REPORTS
-# =========================
-def send_opportunities(signals):
-
-    if not signals:
-        return
-
-    msg = "🏦 MULTI-AGENT OPPORTUNITIES\n\n"
-
-    for s in signals[:5]:
-
-        msg += (
-            f"🪙 {s['symbol']}\n"
-            f"🤖 Score: {s['score']}/4\n"
-            f"💰 Price: {s['price']}\n"
-            f"------------------\n"
-        )
-
-    send_message(msg)
-
-
-def send_trade(symbol, result, score):
-
-    send_message(
-        f"📊 TRADE\n"
-        f"{symbol}\n"
-        f"Result: {result}\n"
-        f"Agents Score: {score}/4"
-    )
-
-
-def send_portfolio(cycle):
-
-    send_message(
-        f"💼 PORTFOLIO\n"
-        f"Balance: {portfolio['balance']}\n"
-        f"Positions: {len(positions)}\n"
-        f"Cycle: {cycle}"
+def place_order(symbol, quantity):
+    return client.order_market_buy(
+        symbol=symbol,
+        quantity=quantity
     )
 
 
 # =========================
-# 🚀 MAIN LOOP
+# 🔔 TELEGRAM ALERT
 # =========================
-print("🤖 HEDGE FUND AI V20 MULTI-AGENT STARTED")
 
-send_message("🚀 V20 Multi-Agent AI Started")
+def send_alert(message):
+    token = "YOUR_TELEGRAM_TOKEN"
+    chat_id = "YOUR_CHAT_ID"
 
-cycle = 0
+    url = f"https://api.telegram.org/bot{token}/sendMessage"
+    requests.post(url, data={"chat_id": chat_id, "text": message})
 
-while True:
 
-    cycle += 1
+# =========================
+# 🚀 MAIN ENGINE
+# =========================
 
-    signals = scan()
+def run_bot(symbol, df, level, balance):
 
-    send_opportunities(signals)
+    score = ai_score(df, level)
 
-    if signals:
+    if score < 80:
+        return "NO TRADE"
 
-        best = signals[0]
+    risk = dynamic_risk(balance, score)
 
-        result = execute(best["symbol"], best["price"], best["score"])
+    if risk == 0:
+        return "RISK BLOCKED"
 
-        if result:
-            send_trade(best["symbol"], result, best["score"])
+    entry = df['close'].iloc[-1]
+    atr_value = atr(df).iloc[-1]
 
-    send_portfolio(cycle)
+    sl = stop_loss(entry, atr_value)
+    tp = take_profit(entry)
 
-    time.sleep(20)
+    qty = risk / (entry - sl)
+
+    place_order(symbol, qty)
+
+    send_alert(f"""
+🚨 TRADE EXECUTED
+
+Symbol: {symbol}
+Score: {score}
+
+Entry: {entry}
+SL: {sl}
+TP: {tp}
+
+Risk: {risk}
+""")
+
+    return "TRADE EXECUTED"
+
+
+# =========================
+# 🔁 LOOP (SIMULATION)
+# =========================
+
+def start(all_symbols, data_dict, balance):
+
+    for symbol in all_symbols:
+
+        df = data_dict[symbol]
+        level = df['close'].max()
+
+        result = run_bot(symbol, df, level, balance)
+
+        print(symbol, result)
+
+
+# =========================
+# 🏁 END
+# =========================
